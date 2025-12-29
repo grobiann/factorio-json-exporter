@@ -10,7 +10,7 @@ import sys
 import os
 import argparse
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 import tkinter as tk
 from tkinter import filedialog
 
@@ -45,246 +45,418 @@ def parse_lua_value(value_str: str) -> Any:
 
 
 def extract_tables_from_lua(content: str) -> List[str]:
-    """Extract individual table definitions from data:extend call."""
-    # Find data:extend({ ... })
+    """Extract individual table definitions from all data:extend calls."""
+    all_tables = []
+    
+    # Find all data:extend({ ... }) calls
     pattern = r'data:extend\s*\(\s*\{'
-    match = re.search(pattern, content)
     
-    if not match:
-        return []
-    
-    # Find the matching closing braces
-    start = match.end() - 1  # Position of opening {
-    pos = start + 1
-    brace_count = 1
-    
-    while pos < len(content) and brace_count > 0:
-        if content[pos] == '{':
-            brace_count += 1
-        elif content[pos] == '}':
-            brace_count -= 1
-        pos += 1
-    
-    # Extract the content between braces
-    table_array_content = content[start+1:pos-1]
-    
-    # Split into individual table definitions
-    tables = []
-    current_table = []
-    brace_count = 0
-    in_string = False
-    string_char = None
-    escape_next = False
-    
-    for char in table_array_content:
-        if escape_next:
-            current_table.append(char)
-            escape_next = False
-            continue
+    # Search for all occurrences
+    search_pos = 0
+    while True:
+        match = re.search(pattern, content[search_pos:])
+        if not match:
+            break
         
-        if char == '\\' and in_string:
-            escape_next = True
-            current_table.append(char)
-            continue
+        # Adjust position to absolute position in content
+        match_start = search_pos + match.start()
+        match_end = search_pos + match.end()
         
-        if char in ['"', "'"] and not in_string:
-            in_string = True
-            string_char = char
-            current_table.append(char)
-        elif in_string and char == string_char:
-            in_string = False
-            string_char = None
-            current_table.append(char)
-        elif not in_string:
-            if char == '{':
-                if brace_count == 0:
-                    # Start of a new table
-                    current_table = [char]
-                else:
-                    current_table.append(char)
+        # Find the matching closing braces
+        start = match_end - 1  # Position of opening {
+        pos = start + 1
+        brace_count = 1
+        
+        while pos < len(content) and brace_count > 0:
+            if content[pos] == '{':
                 brace_count += 1
-            elif char == '}':
+            elif content[pos] == '}':
                 brace_count -= 1
+            pos += 1
+        
+        # Extract the content between braces
+        table_array_content = content[start+1:pos-1]
+        
+        # Split into individual table definitions
+        current_table = []
+        brace_count = 0
+        in_string = False
+        string_char = None
+        escape_next = False
+        
+        for char in table_array_content:
+            if escape_next:
                 current_table.append(char)
-                if brace_count == 0:
-                    # End of current table
-                    tables.append(''.join(current_table))
-                    current_table = []
-            elif brace_count > 0:
+                escape_next = False
+                continue
+            
+            if char == '\\' and in_string:
+                escape_next = True
                 current_table.append(char)
-        else:
-            current_table.append(char)
+                continue
+            
+            if char in ['"', "'"] and not in_string:
+                in_string = True
+                string_char = char
+                current_table.append(char)
+            elif in_string and char == string_char:
+                in_string = False
+                string_char = None
+                current_table.append(char)
+            elif not in_string:
+                if char == '{':
+                    if brace_count == 0:
+                        # Start of a new table
+                        current_table = [char]
+                    else:
+                        current_table.append(char)
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    current_table.append(char)
+                    if brace_count == 0:
+                        # End of current table
+                        all_tables.append(''.join(current_table))
+                        current_table = []
+                elif brace_count > 0:
+                    current_table.append(char)
+            else:
+                current_table.append(char)
+        
+        # Move search position forward to find next data:extend
+        search_pos = pos
     
-    return tables
+    return all_tables
 
 
-def parse_lua_table(table_str: str) -> Dict[str, Any]:
-    """Parse a Lua table string into a Python dict."""
+def parse_lua_table(table_str: str) -> Any:
+    """Parse a Lua table string into a Python dict or list."""
     table_str = table_str.strip()
     
     # Remove outer braces
     if table_str.startswith('{') and table_str.endswith('}'):
         table_str = table_str[1:-1]
     
-    result = {}
-    
-    # Simple regex-based parsing for key-value pairs
-    # This handles: key = value, key = { ... }, key = "string", etc.
-    
-    pos = 0
-    while pos < len(table_str):
-        # Skip whitespace and comments
-        while pos < len(table_str) and table_str[pos] in ' \t\n\r':
-            pos += 1
-        
-        if pos >= len(table_str):
+    # Check if this is an array (no key=value pairs at the top level)
+    # Look for the first non-comment, non-whitespace content
+    is_array = True
+    temp_pos = 0
+    while temp_pos < len(table_str):
+        # Skip whitespace
+        while temp_pos < len(table_str) and table_str[temp_pos] in ' \t\n\r':
+            temp_pos += 1
+        if temp_pos >= len(table_str):
             break
-        
         # Skip comments
-        if table_str[pos:pos+2] == '--':
-            # Skip to end of line
-            while pos < len(table_str) and table_str[pos] != '\n':
-                pos += 1
+        if table_str[temp_pos:temp_pos+2] == '--':
+            while temp_pos < len(table_str) and table_str[temp_pos] != '\n':
+                temp_pos += 1
             continue
-        
-        # Find the key
-        key_match = re.match(r'([a-zA-Z_][a-zA-Z0-9_-]*)\s*=', table_str[pos:])
-        if not key_match:
-            # Skip this character and continue
-            pos += 1
-            continue
-        
-        key = key_match.group(1)
-        pos += key_match.end()
-        
-        # Skip whitespace after =
-        while pos < len(table_str) and table_str[pos] in ' \t\n\r':
-            pos += 1
-        
-        # Find the value
-        if table_str[pos] == '{':
-            # Value is a table/array
-            brace_count = 0
-            value_start = pos
-            in_string = False
-            string_char = None
-            escape_next = False
-            
-            while pos < len(table_str):
-                if escape_next:
-                    escape_next = False
-                    pos += 1
-                    continue
-                
-                if table_str[pos] == '\\' and in_string:
-                    escape_next = True
-                    pos += 1
-                    continue
-                
-                if table_str[pos] in ['"', "'"] and not in_string:
-                    in_string = True
-                    string_char = table_str[pos]
-                elif in_string and table_str[pos] == string_char:
-                    in_string = False
-                    string_char = None
-                elif not in_string:
-                    if table_str[pos] == '{':
-                        brace_count += 1
-                    elif table_str[pos] == '}':
-                        brace_count -= 1
-                        if brace_count == 0:
-                            pos += 1
-                            break
-                
-                pos += 1
-            
-            value_str = table_str[value_start:pos]
-            # Try to parse as nested table
-            if value_str.strip().startswith('{'):
-                try:
-                    result[key] = parse_lua_table(value_str)
-                except:
-                    result[key] = value_str.strip()
-            else:
-                result[key] = value_str.strip()
-        
-        elif table_str[pos] in ['"', "'"]:
-            # Value is a string
-            quote = table_str[pos]
-            pos += 1
-            value_start = pos
-            escape_next = False
-            
-            while pos < len(table_str):
-                if escape_next:
-                    escape_next = False
-                    pos += 1
-                    continue
-                
-                if table_str[pos] == '\\':
-                    escape_next = True
-                    pos += 1
-                    continue
-                
-                if table_str[pos] == quote:
-                    break
-                
-                pos += 1
-            
-            result[key] = table_str[value_start:pos]
-            pos += 1  # Skip closing quote
-        
-        else:
-            # Value is a number, boolean, identifier, or complex expression
-            value_start = pos
-            brace_count = 0
-            bracket_count = 0
-            paren_count = 0
-            in_string = False
-            string_char = None
-            
-            while pos < len(table_str):
-                char = table_str[pos]
-                
-                if char in ['"', "'"] and not in_string:
-                    in_string = True
-                    string_char = char
-                elif in_string and char == string_char:
-                    in_string = False
-                    string_char = None
-                elif not in_string:
-                    if char == '{':
-                        brace_count += 1
-                    elif char == '}':
-                        if brace_count > 0:
-                            brace_count -= 1
-                        else:
-                            break
-                    elif char == '[':
-                        bracket_count += 1
-                    elif char == ']':
-                        bracket_count -= 1
-                    elif char == '(':
-                        paren_count += 1
-                    elif char == ')':
-                        paren_count -= 1
-                    elif char == ',' and brace_count == 0 and bracket_count == 0 and paren_count == 0:
-                        break
-                
-                pos += 1
-            
-            value_str = table_str[value_start:pos].strip()
-            # Remove trailing comma if present
-            if value_str.endswith(','):
-                value_str = value_str[:-1].strip()
-            
-            result[key] = parse_lua_value(value_str)
-        
-        # Skip comma if present
-        while pos < len(table_str) and table_str[pos] in ', \t\n\r':
-            pos += 1
+        # Check if we have a key=value pattern
+        key_check = re.match(r'([a-zA-Z_][a-zA-Z0-9_-]*)\s*=', table_str[temp_pos:])
+        if key_check:
+            is_array = False
+        break
     
-    return result
+    if is_array and table_str.strip():
+        # Parse as array
+        result = []
+        pos = 0
+        
+        while pos < len(table_str):
+            # Skip whitespace and comments
+            while pos < len(table_str) and table_str[pos] in ' \t\n\r':
+                pos += 1
+            
+            if pos >= len(table_str):
+                break
+            
+            # Skip comments
+            if table_str[pos:pos+2] == '--':
+                while pos < len(table_str) and table_str[pos] != '\n':
+                    pos += 1
+                continue
+            
+            # Parse array element
+            if table_str[pos] == '{':
+                # Element is a table
+                brace_count = 0
+                value_start = pos
+                in_string = False
+                string_char = None
+                escape_next = False
+                
+                while pos < len(table_str):
+                    if escape_next:
+                        escape_next = False
+                        pos += 1
+                        continue
+                    
+                    if table_str[pos] == '\\' and in_string:
+                        escape_next = True
+                        pos += 1
+                        continue
+                    
+                    if table_str[pos] in ['"', "'"] and not in_string:
+                        in_string = True
+                        string_char = table_str[pos]
+                    elif in_string and table_str[pos] == string_char:
+                        in_string = False
+                        string_char = None
+                    elif not in_string:
+                        if table_str[pos] == '{':
+                            brace_count += 1
+                        elif table_str[pos] == '}':
+                            brace_count -= 1
+                            if brace_count == 0:
+                                pos += 1
+                                break
+                    
+                    pos += 1
+                
+                value_str = table_str[value_start:pos]
+                try:
+                    result.append(parse_lua_table(value_str))
+                except:
+                    result.append(value_str.strip())
+            
+            elif table_str[pos] in ['"', "'"]:
+                # Element is a string
+                quote = table_str[pos]
+                pos += 1
+                value_start = pos
+                escape_next = False
+                
+                while pos < len(table_str):
+                    if escape_next:
+                        escape_next = False
+                        pos += 1
+                        continue
+                    
+                    if table_str[pos] == '\\':
+                        escape_next = True
+                        pos += 1
+                        continue
+                    
+                    if table_str[pos] == quote:
+                        break
+                    
+                    pos += 1
+                
+                result.append(table_str[value_start:pos])
+                pos += 1  # Skip closing quote
+            
+            else:
+                # Element is a number, boolean, or identifier
+                value_start = pos
+                brace_count = 0
+                bracket_count = 0
+                paren_count = 0
+                in_string = False
+                string_char = None
+                
+                while pos < len(table_str):
+                    char = table_str[pos]
+                    
+                    if char in ['"', "'"] and not in_string:
+                        in_string = True
+                        string_char = char
+                    elif in_string and char == string_char:
+                        in_string = False
+                        string_char = None
+                    elif not in_string:
+                        if char == '{':
+                            brace_count += 1
+                        elif char == '}':
+                            if brace_count > 0:
+                                brace_count -= 1
+                            else:
+                                break
+                        elif char == '[':
+                            bracket_count += 1
+                        elif char == ']':
+                            bracket_count -= 1
+                        elif char == '(':
+                            paren_count += 1
+                        elif char == ')':
+                            paren_count -= 1
+                        elif char == ',' and brace_count == 0 and bracket_count == 0 and paren_count == 0:
+                            break
+                    
+                    pos += 1
+                
+                value_str = table_str[value_start:pos].strip()
+                if value_str.endswith(','):
+                    value_str = value_str[:-1].strip()
+                
+                if value_str:
+                    result.append(parse_lua_value(value_str))
+            
+            # Skip comma if present
+            while pos < len(table_str) and table_str[pos] in ', \t\n\r':
+                pos += 1
+        
+        return result
+    
+    else:
+        # Parse as dictionary
+        result = {}
+        pos = 0
+        
+        while pos < len(table_str):
+            # Skip whitespace and comments
+            while pos < len(table_str) and table_str[pos] in ' \t\n\r':
+                pos += 1
+            
+            if pos >= len(table_str):
+                break
+            
+            # Skip comments
+            if table_str[pos:pos+2] == '--':
+                # Skip to end of line
+                while pos < len(table_str) and table_str[pos] != '\n':
+                    pos += 1
+                continue
+            
+            # Find the key
+            key_match = re.match(r'([a-zA-Z_][a-zA-Z0-9_-]*)\s*=', table_str[pos:])
+            if not key_match:
+                # Skip this character and continue
+                pos += 1
+                continue
+            
+            key = key_match.group(1)
+            pos += key_match.end()
+            
+            # Skip whitespace after =
+            while pos < len(table_str) and table_str[pos] in ' \t\n\r':
+                pos += 1
+            
+            # Find the value
+            if table_str[pos] == '{':
+                # Value is a table/array
+                brace_count = 0
+                value_start = pos
+                in_string = False
+                string_char = None
+                escape_next = False
+                
+                while pos < len(table_str):
+                    if escape_next:
+                        escape_next = False
+                        pos += 1
+                        continue
+                    
+                    if table_str[pos] == '\\' and in_string:
+                        escape_next = True
+                        pos += 1
+                        continue
+                    
+                    if table_str[pos] in ['"', "'"] and not in_string:
+                        in_string = True
+                        string_char = table_str[pos]
+                    elif in_string and table_str[pos] == string_char:
+                        in_string = False
+                        string_char = None
+                    elif not in_string:
+                        if table_str[pos] == '{':
+                            brace_count += 1
+                        elif table_str[pos] == '}':
+                            brace_count -= 1
+                            if brace_count == 0:
+                                pos += 1
+                                break
+                    
+                    pos += 1
+                
+                value_str = table_str[value_start:pos]
+                # Try to parse as nested table
+                if value_str.strip().startswith('{'):
+                    try:
+                        result[key] = parse_lua_table(value_str)
+                    except:
+                        result[key] = value_str.strip()
+                else:
+                    result[key] = value_str.strip()
+                    result[key] = value_str.strip()
+            
+            elif table_str[pos] in ['"', "'"]:
+                # Value is a string
+                quote = table_str[pos]
+                pos += 1
+                value_start = pos
+                escape_next = False
+                
+                while pos < len(table_str):
+                    if escape_next:
+                        escape_next = False
+                        pos += 1
+                        continue
+                    
+                    if table_str[pos] == '\\':
+                        escape_next = True
+                        pos += 1
+                        continue
+                    
+                    if table_str[pos] == quote:
+                        break
+                    
+                    pos += 1
+                
+                result[key] = table_str[value_start:pos]
+                pos += 1  # Skip closing quote
+            
+            else:
+                # Value is a number, boolean, identifier, or complex expression
+                value_start = pos
+                brace_count = 0
+                bracket_count = 0
+                paren_count = 0
+                in_string = False
+                string_char = None
+                
+                while pos < len(table_str):
+                    char = table_str[pos]
+                    
+                    if char in ['"', "'"] and not in_string:
+                        in_string = True
+                        string_char = char
+                    elif in_string and char == string_char:
+                        in_string = False
+                        string_char = None
+                    elif not in_string:
+                        if char == '{':
+                            brace_count += 1
+                        elif char == '}':
+                            if brace_count > 0:
+                                brace_count -= 1
+                            else:
+                                break
+                        elif char == '[':
+                            bracket_count += 1
+                        elif char == ']':
+                            bracket_count -= 1
+                        elif char == '(':
+                            paren_count += 1
+                        elif char == ')':
+                            paren_count -= 1
+                        elif char == ',' and brace_count == 0 and bracket_count == 0 and paren_count == 0:
+                            break
+                    
+                    pos += 1
+                
+                value_str = table_str[value_start:pos].strip()
+                # Remove trailing comma if present
+                if value_str.endswith(','):
+                    value_str = value_str[:-1].strip()
+                
+                result[key] = parse_lua_value(value_str)
+            
+            # Skip comma if present
+            while pos < len(table_str) and table_str[pos] in ', \t\n\r':
+                pos += 1
+        
+        return result
 
 
 def convert_lua_to_json(lua_file_path: str, output_file_path: Optional[str] = None) -> str:
@@ -329,7 +501,11 @@ def convert_lua_to_json(lua_file_path: str, output_file_path: Optional[str] = No
     
     print(f"Writing {output_file_path}...")
     
-    # Write JSON file
+    # Ensure output directory exists
+    output_path = Path(output_file_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Write JSON file (overwrite if exists)
     with open(output_file_path, 'w', encoding='utf-8') as f:
         json.dump(items, f, indent=2, ensure_ascii=False)
     
