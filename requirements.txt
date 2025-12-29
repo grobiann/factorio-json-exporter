@@ -1,0 +1,3 @@
+# Factorio Lua to JSON Exporter - Requirements
+# No external dependencies required - uses only Python standard library
+# Tested with Python 3.8+
