@@ -6,6 +6,7 @@ Lua 데이터 파일(예: Factorio 모드의 items.lua)을 JSON 형식으로 변
 
 - Lua `data:extend()` 호출에서 데이터 추출
 - Lua 테이블 구조를 Python 딕셔너리로 파싱
+- **Lua 표현식 평가**: `data_util.mod_prefix .. "copper-ingot"` 같은 문자열 연결 및 변수 참조 처리
 - JSON 형식으로 변환 및 저장
 - **폴더 재귀 처리**: 폴더를 선택하면 하위 폴더의 모든 .lua 파일을 자동으로 변환
 - **폴더 구조 유지**: 출력 시 원본 폴더 구조를 그대로 유지
@@ -88,7 +89,30 @@ output/
 ## 요구사항
 
 - Python 3.8 이상
-- 표준 라이브러리만 사용 (외부 의존성 없음)
+- (선택사항) `lupa` - Lua 표현식 평가를 위해 (없어도 기본 문자열 연결은 동작함)
+
+### 설치
+
+기본 설치 (간단한 Lua 표현식만 지원):
+```bash
+# 외부 의존성 없이 사용 가능
+python lua_to_json.py
+```
+
+완전한 Lua 지원 설치 (권장):
+```bash
+pip install -r requirements.txt
+# 또는
+pip install lupa
+```
+
+`lupa` 라이브러리를 설치하면:
+- 복잡한 Lua 표현식 평가 가능
+- `data_util.lua` 같은 모듈 자동 로드
+- 모드의 실제 `mod_prefix` 값 감지
+- 더 정확한 변환 결과
+
+`lupa` 없이도 기본적인 문자열 연결(`..`) 패턴은 fallback 방식으로 처리됩니다.
 
 ## 지원되는 Lua 구조
 
@@ -100,8 +124,12 @@ output/
 - nil 값
 - 중첩된 테이블
 - 주석 (한 줄, 여러 줄)
+- **문자열 연결** (`data_util.mod_prefix .. "copper-ingot"`)
+- **변수 참조** (`data_util.mod_prefix`, `SEItemNames.get_glass_name()` 등)
 
 ## 예시
+
+### 기본 예시
 
 입력 파일 (items.lua):
 ```lua
@@ -128,6 +156,46 @@ data:extend({
   }
 ]
 ```
+
+### Lua 표현식 평가 예시
+
+입력 파일 (recipes.lua):
+```lua
+local data_util = {
+    mod_prefix = "se-"
+}
+
+data:extend({
+  {
+    type = "recipe",
+    name = data_util.mod_prefix .. "copper-ingot",
+    results = {
+      {type = "item", name = data_util.mod_prefix .. "copper-ingot", amount = 1},
+    },
+    energy_required = 25,
+  }
+})
+```
+
+출력 파일 (recipes.json):
+```json
+[
+  {
+    "type": "recipe",
+    "name": "se-copper-ingot",
+    "results": [
+      {
+        "type": "item",
+        "name": "se-copper-ingot",
+        "amount": 1
+      }
+    ],
+    "energy_required": 25
+  }
+]
+```
+
+프로그램이 자동으로 `data_util.mod_prefix .. "copper-ingot"`를 `"se-copper-ingot"`로 평가합니다!
 
 ## 라이선스
 

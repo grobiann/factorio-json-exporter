@@ -14,8 +14,170 @@ from typing import Any, Dict, List, Optional, Union
 import tkinter as tk
 from tkinter import filedialog
 
+# Try to import lupa for Lua expression evaluation
+try:
+    from lupa import LuaRuntime
+    LUPA_AVAILABLE = True
+except ImportError:
+    LUPA_AVAILABLE = False
+    print("Warning: lupa not installed. Lua expression evaluation will be limited.")
+    print("Install with: pip install lupa")
 
-def parse_lua_value(value_str: str) -> Any:
+
+class LuaEvaluator:
+    """Evaluates Lua expressions using either lupa or fallback methods."""
+    
+    def __init__(self, lua_file_path: str):
+        self.lua_file_path = lua_file_path
+        self.lua = None
+        self.context = {}
+        
+        if LUPA_AVAILABLE:
+            try:
+                self.lua = LuaRuntime(unpack_returned_tuples=True)
+                self._setup_lua_environment()
+            except Exception as e:
+                print(f"Warning: Failed to initialize Lua runtime: {e}")
+                self.lua = None
+    
+    def _setup_lua_environment(self):
+        """Setup Lua environment with common Factorio mod patterns."""
+        if not self.lua:
+            return
+        
+        try:
+            # Setup basic Lua environment
+            self.lua.execute("""
+                -- Mock data_util module for common mods like Space Exploration
+                data_util = {
+                    mod_prefix = "se-"  -- Default prefix for Space Exploration
+                }
+                
+                -- Mock data table
+                data = {
+                    raw = {},
+                    extend = function(self, items) end
+                }
+                
+                -- Try to load actual data_util if it exists
+                local data_util_path = nil
+            """)
+            
+            # Try to load the actual data_util.lua from the same directory or parent directories
+            lua_dir = Path(self.lua_file_path).parent
+            data_util_paths = [
+                lua_dir / "data_util.lua",
+                lua_dir.parent / "data_util.lua",
+                lua_dir.parent.parent / "data_util.lua"
+            ]
+            
+            for data_util_path in data_util_paths:
+                if data_util_path.exists():
+                    print(f"Found data_util.lua at: {data_util_path}")
+                    try:
+                        with open(data_util_path, 'r', encoding='utf-8') as f:
+                            data_util_content = f.read()
+                        # Execute it in the Lua environment
+                        self.lua.execute(data_util_content)
+                        print("Successfully loaded data_util.lua")
+                        break
+                    except Exception as e:
+                        print(f"Warning: Failed to load data_util.lua: {e}")
+            
+            # Get the mod_prefix value if available
+            try:
+                data_util = self.lua.eval("data_util")
+                if data_util and hasattr(data_util, "mod_prefix"):
+                    mod_prefix = data_util.mod_prefix
+                    self.context["mod_prefix"] = mod_prefix
+                    print(f"Detected mod_prefix: {mod_prefix}")
+            except:
+                pass
+                
+        except Exception as e:
+            print(f"Warning: Error setting up Lua environment: {e}")
+    
+    def evaluate(self, expression: str) -> Any:
+        """Evaluate a Lua expression and return the result."""
+        expression = expression.strip()
+        
+        # Try lupa first if available
+        if self.lua:
+            try:
+                result = self.lua.eval(expression)
+                # Convert Lua table to Python dict/list if needed
+                if hasattr(result, '__iter__') and not isinstance(result, str):
+                    return self._convert_lua_table(result)
+                return result
+            except Exception as e:
+                # Fall through to fallback methods
+                pass
+        
+        # Fallback: Simple pattern matching for common cases
+        return self._evaluate_fallback(expression)
+    
+    def _evaluate_fallback(self, expression: str) -> Any:
+        """Fallback evaluation for simple expressions without lupa."""
+        # Handle string concatenation: data_util.mod_prefix .. "string"
+        concat_pattern = r'(\w+(?:\.\w+)+)\s*\.\.\s*["\']([^"\']*)["\']'
+        match = re.match(concat_pattern, expression)
+        if match:
+            var_path = match.group(1)
+            string_part = match.group(2)
+            
+            # Try to resolve the variable
+            var_value = self._resolve_variable(var_path)
+            if var_value is not None:
+                return str(var_value) + string_part
+        
+        # Handle simple variable references
+        if re.match(r'^\w+(?:\.\w+)*$', expression):
+            return self._resolve_variable(expression)
+        
+        # Return as-is if we can't evaluate
+        return expression
+    
+    def _resolve_variable(self, var_path: str) -> Optional[str]:
+        """Resolve a variable path like 'data_util.mod_prefix'."""
+        # Common known values
+        known_values = {
+            "data_util.mod_prefix": "se-",  # Space Exploration default
+        }
+        
+        if var_path in known_values:
+            return known_values[var_path]
+        
+        # Check our context
+        if var_path in self.context:
+            return self.context[var_path]
+        
+        return None
+    
+    def _convert_lua_table(self, lua_table) -> Union[Dict, List]:
+        """Convert a Lua table to Python dict or list."""
+        try:
+            # Try to convert as dict
+            result = {}
+            for key in lua_table:
+                value = lua_table[key]
+                if hasattr(value, '__iter__') and not isinstance(value, str):
+                    value = self._convert_lua_table(value)
+                result[key] = value
+            return result
+        except:
+            # Try as list
+            try:
+                result = []
+                for item in lua_table:
+                    if hasattr(item, '__iter__') and not isinstance(item, str):
+                        item = self._convert_lua_table(item)
+                    result.append(item)
+                return result
+            except:
+                return str(lua_table)
+
+
+def parse_lua_value(value_str: str, evaluator: Optional['LuaEvaluator'] = None) -> Any:
     """Parse a simple Lua value string."""
     value_str = value_str.strip()
     
@@ -39,6 +201,15 @@ def parse_lua_value(value_str: str) -> Any:
     if (value_str.startswith('"') and value_str.endswith('"')) or \
        (value_str.startswith("'") and value_str.endswith("'")):
         return value_str[1:-1]
+    
+    # Try to evaluate as Lua expression if evaluator is available
+    if evaluator and ('..' in value_str or '.' in value_str):
+        try:
+            result = evaluator.evaluate(value_str)
+            if result != value_str:  # Successfully evaluated
+                return result
+        except:
+            pass
     
     # Otherwise, return as is (identifiers, complex expressions, etc.)
     return value_str
@@ -129,7 +300,7 @@ def extract_tables_from_lua(content: str) -> List[str]:
     return all_tables
 
 
-def parse_lua_table(table_str: str) -> Any:
+def parse_lua_table(table_str: str, evaluator: Optional['LuaEvaluator'] = None) -> Any:
     """Parse a Lua table string into a Python dict or list."""
     table_str = table_str.strip()
     
@@ -216,7 +387,7 @@ def parse_lua_table(table_str: str) -> Any:
                 
                 value_str = table_str[value_start:pos]
                 try:
-                    result.append(parse_lua_table(value_str))
+                    result.append(parse_lua_table(value_str, evaluator))
                 except:
                     result.append(value_str.strip())
             
@@ -295,7 +466,7 @@ def parse_lua_table(table_str: str) -> Any:
                     value_str = value_str[:-1].strip()
                 
                 if value_str:
-                    result.append(parse_lua_value(value_str))
+                    result.append(parse_lua_value(value_str, evaluator))
             
             # Skip comma if present
             while pos < len(table_str) and table_str[pos] in ', \t\n\r':
@@ -378,7 +549,7 @@ def parse_lua_table(table_str: str) -> Any:
                 # Try to parse as nested table
                 if value_str.strip().startswith('{'):
                     try:
-                        result[key] = parse_lua_table(value_str)
+                        result[key] = parse_lua_table(value_str, evaluator)
                     except:
                         result[key] = value_str.strip()
                 else:
@@ -459,7 +630,7 @@ def parse_lua_table(table_str: str) -> Any:
                 if value_str.endswith(','):
                     value_str = value_str[:-1].strip()
                 
-                result[key] = parse_lua_value(value_str)
+                result[key] = parse_lua_value(value_str, evaluator)
             
             # Skip comma if present
             while pos < len(table_str) and table_str[pos] in ', \t\n\r':
@@ -485,6 +656,9 @@ def convert_lua_to_json(lua_file_path: str, output_file_path: Optional[str] = No
     with open(lua_file_path, 'r', encoding='utf-8') as f:
         lua_content = f.read()
     
+    # Initialize Lua evaluator for this file
+    evaluator = LuaEvaluator(lua_file_path)
+    
     print(f"Extracting tables...")
     
     # Extract tables
@@ -496,7 +670,7 @@ def convert_lua_to_json(lua_file_path: str, output_file_path: Optional[str] = No
     for i, table_str in enumerate(table_strings, 1):
         print(f"Parsing table {i}/{len(table_strings)}...")
         try:
-            parsed = parse_lua_table(table_str)
+            parsed = parse_lua_table(table_str, evaluator)
             items.append(parsed)
         except Exception as e:
             print(f"Warning: Failed to parse table {i}: {e}")
