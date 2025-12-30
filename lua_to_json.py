@@ -254,6 +254,7 @@ def parse_lua_table(table_str: str) -> Any:
                 paren_count = 0
                 in_string = False
                 string_char = None
+                old_pos = pos
                 
                 while pos < len(table_str):
                     char = table_str[pos]
@@ -283,6 +284,10 @@ def parse_lua_table(table_str: str) -> Any:
                         elif char == ',' and brace_count == 0 and bracket_count == 0 and paren_count == 0:
                             break
                     
+                    pos += 1
+                
+                # Prevent infinite loop: ensure pos has advanced
+                if pos == old_pos:
                     pos += 1
                 
                 value_str = table_str[value_start:pos].strip()
@@ -378,7 +383,6 @@ def parse_lua_table(table_str: str) -> Any:
                         result[key] = value_str.strip()
                 else:
                     result[key] = value_str.strip()
-                    result[key] = value_str.strip()
             
             elif table_str[pos] in ['"', "'"]:
                 # Value is a string
@@ -414,6 +418,7 @@ def parse_lua_table(table_str: str) -> Any:
                 paren_count = 0
                 in_string = False
                 string_char = None
+                old_pos = pos
                 
                 while pos < len(table_str):
                     char = table_str[pos]
@@ -443,6 +448,10 @@ def parse_lua_table(table_str: str) -> Any:
                         elif char == ',' and brace_count == 0 and bracket_count == 0 and paren_count == 0:
                             break
                     
+                    pos += 1
+                
+                # Prevent infinite loop: ensure pos has advanced
+                if pos == old_pos:
                     pos += 1
                 
                 value_str = table_str[value_start:pos].strip()
