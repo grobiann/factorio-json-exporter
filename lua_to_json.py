@@ -418,8 +418,9 @@ def extract_tables_from_lua(content: str) -> List[str]:
     """Extract individual table definitions from all data:extend calls."""
     all_tables = []
     
-    # Find all data:extend({ ... }) calls
-    pattern = r'data:extend\s*\(\s*\{'
+    # Find all data:extend({ ... }) or data:extend{ ... } calls
+    # Lua allows omitting parentheses when the only argument is a table
+    pattern = r'data:extend\s*(\(\s*)?\{'
     
     # Search for all occurrences
     search_pos = 0
