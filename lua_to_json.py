@@ -50,13 +50,62 @@ class LuaEvaluator:
             self.lua.execute("""
                 -- Mock data_util module for common mods like Space Exploration
                 data_util = {
-                    mod_prefix = "se-"  -- Default prefix for Space Exploration
+                    mod_prefix = "se-",  -- Default prefix for Space Exploration
+                    sub_icons = function(icon1, icon2)
+                        -- Return nil since we can't evaluate icons at parse time
+                        return nil
+                    end
                 }
                 
-                -- Mock data table
+                -- Simulate checking for Krastorio 2 items
+                -- Check if kr-sand or kr-glass exists (common with Krastorio 2)
+                local sand_name = "sand"
+                local glass_name = "glass"
+                
+                -- Mock data table with Krastorio 2 items if they might exist
                 data = {
-                    raw = {},
+                    raw = {
+                        item = {
+                            ["kr-sand"] = {},  -- Simulate Krastorio 2 sand
+                            ["kr-glass"] = {}, -- Simulate Krastorio 2 glass
+                        },
+                        fluid = {},
+                        recipe = {}
+                    },
                     extend = function(self, items) end
+                }
+                
+                -- Check for Krastorio 2 sand
+                local sand_names_to_check = {"sand", "kr-sand"}
+                for _, item_name in pairs(sand_names_to_check) do
+                    if data.raw.item[item_name] then
+                        sand_name = item_name
+                        break
+                    end
+                end
+                
+                -- Check for Krastorio 2 glass
+                local glass_names_to_check = {"glass", "kr-glass"}
+                for _, item_name in pairs(glass_names_to_check) do
+                    if data.raw.item[item_name] then
+                        glass_name = item_name
+                        break
+                    end
+                end
+                
+                -- Mock SEItemNames module with detected values
+                SEItemNames = {
+                    get_sand_name = function()
+                        return sand_name
+                    end,
+                    get_glass_name = function()
+                        return glass_name
+                    end
+                }
+                
+                -- Mock mods table for compatibility checks
+                mods = {
+                    ["Krastorio2"] = "1.0.0"  -- Simulate Krastorio 2 being installed
                 }
                 
                 -- Try to load actual data_util if it exists
@@ -83,6 +132,55 @@ class LuaEvaluator:
                         break
                     except Exception as e:
                         print(f"Warning: Failed to load data_util.lua: {e}")
+            
+            # Try to load SEItemNames.lua or item-names.lua
+            seitemnames_paths = [
+                lua_dir / "SEItemNames.lua",
+                lua_dir / "item-names.lua",
+                lua_dir.parent / "SEItemNames.lua",
+                lua_dir.parent / "item-names.lua",
+                lua_dir.parent / "compatibility" / "item-names.lua",
+                lua_dir.parent.parent / "SEItemNames.lua",
+                lua_dir.parent.parent / "item-names.lua",
+                lua_dir.parent.parent / "compatibility" / "item-names.lua",
+                lua_dir.parent.parent.parent / "compatibility" / "item-names.lua",
+            ]
+            
+            for seitemnames_path in seitemnames_paths:
+                if seitemnames_path.exists():
+                    print(f"Found item-names.lua at: {seitemnames_path}")
+                    try:
+                        with open(seitemnames_path, 'r', encoding='utf-8') as f:
+                            seitemnames_content = f.read()
+                        # Execute it in the Lua environment
+                        result = self.lua.execute("SEItemNames = " + seitemnames_content)
+                        print("Successfully loaded item-names.lua")
+                        
+                        # Try to get the actual sand name
+                        try:
+                            sand_name = self.lua.eval("SEItemNames.get_sand_name()")
+                            glass_name = self.lua.eval("SEItemNames.get_glass_name()")
+                            print(f"SEItemNames.get_sand_name() = {sand_name}")
+                            print(f"SEItemNames.get_glass_name() = {glass_name}")
+                            self.context["sand_name"] = sand_name
+                            self.context["glass_name"] = glass_name
+                        except Exception as e:
+                            print(f"Warning: Could not evaluate SEItemNames functions: {e}")
+                        break
+                    except Exception as e:
+                        print(f"Warning: Failed to load item-names.lua: {e}")
+            
+            # If item-names.lua was not found, try to evaluate the functions anyway
+            if "sand_name" not in self.context:
+                try:
+                    sand_name = self.lua.eval("SEItemNames.get_sand_name()")
+                    glass_name = self.lua.eval("SEItemNames.get_glass_name()")
+                    print(f"SEItemNames.get_sand_name() = {sand_name}")
+                    print(f"SEItemNames.get_glass_name() = {glass_name}")
+                    self.context["sand_name"] = sand_name
+                    self.context["glass_name"] = glass_name
+                except Exception as e:
+                    print(f"Using default sand/glass names")
             
             # Get the mod_prefix value if available
             try:
@@ -118,6 +216,30 @@ class LuaEvaluator:
     
     def _evaluate_fallback(self, expression: str) -> Any:
         """Fallback evaluation for simple expressions without lupa."""
+        # Handle function calls like SEItemNames.get_sand_name()
+        func_call_pattern = r'(\w+(?:\.\w+)+)\s*\(\s*\)'
+        match = re.match(func_call_pattern, expression)
+        if match:
+            func_path = match.group(1)
+            
+            # Check context first for dynamically loaded values
+            if func_path == "SEItemNames.get_sand_name" and "sand_name" in self.context:
+                return self.context["sand_name"]
+            if func_path == "SEItemNames.get_glass_name" and "glass_name" in self.context:
+                return self.context["glass_name"]
+            
+            # Known function mappings as fallback (prefer Krastorio 2 items)
+            known_functions = {
+                "SEItemNames.get_sand_name": "kr-sand",
+                "SEItemNames.get_glass_name": "kr-glass",
+            }
+            if func_path in known_functions:
+                return known_functions[func_path]
+        
+        # Handle data_util.sub_icons() - extract icon references
+        if "data_util.sub_icons" in expression or "sub_icons" in expression:
+            return self._extract_icon_names(expression)
+        
         # Handle string concatenation: data_util.mod_prefix .. "string"
         concat_pattern = r'(\w+(?:\.\w+)+)\s*\.\.\s*["\']([^"\']*)["\']'
         match = re.match(concat_pattern, expression)
@@ -136,6 +258,83 @@ class LuaEvaluator:
         
         # Return as-is if we can't evaluate
         return expression
+    
+    def _extract_icon_names(self, expression: str) -> List[str]:
+        """Extract icon names from data_util.sub_icons() or similar expressions."""
+        icons = []
+        
+        # Find all arguments inside sub_icons(...)
+        sub_icons_match = re.search(r'sub_icons\s*\((.*)\)', expression, re.DOTALL)
+        if not sub_icons_match:
+            return None
+        
+        args_content = sub_icons_match.group(1)
+        
+        # Split by comma at the top level (not inside brackets or quotes)
+        args = []
+        current_arg = []
+        bracket_count = 0
+        in_string = False
+        string_char = None
+        
+        for char in args_content:
+            if char in ['"', "'"] and not in_string:
+                in_string = True
+                string_char = char
+                current_arg.append(char)
+            elif in_string and char == string_char:
+                in_string = False
+                string_char = None
+                current_arg.append(char)
+            elif not in_string:
+                if char in ['[', '(']:
+                    bracket_count += 1
+                    current_arg.append(char)
+                elif char in [']', ')']:
+                    bracket_count -= 1
+                    current_arg.append(char)
+                elif char == ',' and bracket_count == 0:
+                    args.append(''.join(current_arg).strip())
+                    current_arg = []
+                else:
+                    current_arg.append(char)
+            else:
+                current_arg.append(char)
+        
+        if current_arg:
+            args.append(''.join(current_arg).strip())
+        
+        # Extract item/fluid names from each argument
+        for arg in args:
+            # Pattern: data.raw.item["name"].icon or data.raw.fluid["name"].icon
+            item_match = re.search(r'data\.raw\.(?:item|fluid)\[([^\]]+)\]', arg)
+            if item_match:
+                name_part = item_match.group(1)
+                
+                # Check if it contains mod_prefix concatenation
+                if 'data_util.mod_prefix' in name_part or 'mod_prefix' in name_part:
+                    # Extract string after ..
+                    concat_match = re.search(r'\.\.\s*["\']([^"\']+)["\']', name_part)
+                    if concat_match:
+                        mod_prefix = self._resolve_variable("data_util.mod_prefix") or "se-"
+                        icons.append(mod_prefix + concat_match.group(1))
+                        continue
+                
+                # Direct string reference
+                string_match = re.match(r'["\']([^"\']+)["\']', name_part.strip())
+                if string_match:
+                    icons.append(string_match.group(1))
+                    continue
+                
+                # Try evaluating as expression
+                try:
+                    evaluated = self.evaluate(name_part)
+                    if evaluated and isinstance(evaluated, str):
+                        icons.append(evaluated)
+                except:
+                    pass
+        
+        return icons if icons else None
     
     def _resolve_variable(self, var_path: str) -> Optional[str]:
         """Resolve a variable path like 'data_util.mod_prefix'."""
